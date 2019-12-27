@@ -1,0 +1,296 @@
+library(tidyverse)
+library(recipes)
+library(rsample)
+
+earth01 <- read.csv('train_values.csv', dec = '.')
+earth02 <- read.csv('train_labels.csv', dec = '.')
+
+##Prediction
+earth03 <- read.csv('test_values.csv', dec = '.')
+
+quake <- merge(earth01, earth02, by = 'building_id')
+str(quake)
+head(quake)
+dim(quake)
+
+hist(quake$damage_grade)
+##Tranformar em problema de classificação
+quake$damage_grade <- factor(quake$damage_grade, levels = c('1','2','3'),
+                                labels = c('leve','mod','grave'))
+
+## --- Test interactios ---------------- ##
+library(splines)
+
+quake.t <- quake %>% 
+  mutate(
+    damage = ifelse(damage_grade == 'leve','baixo','alto'),
+    damage = factor(damage, levels = c('baixo','alto'))
+  )
+
+model_01 <- glm(damage ~ ns(age, 3), data = quake.t, family = 'binomial')
+summary(model_01)
+
+# interaction
+model_02 <- glm(damage ~ ns(area_percentage, 3) + age:area_percentage, data = quake.t, family = 'binomial')
+summary(model_02)
+
+model_03 <- glm(damage ~ area_percentage + height_percentage,
+                data = quake.t, family = 'binomial')
+summary(model_03)
+
+model_04 <- glm(damage ~ area_percentage + height_percentage + area_percentage:height_percentage,
+                data = quake.t, family = 'binomial')
+summary(model_04)
+
+###Retirar outliers######################
+hist(quake$age)
+hist(quake$count_floors_pre_eq)
+hist(quake$area_percentage)
+hist(quake$height_percentage)
+
+quake$age <- ifelse(quake$age > 100,100,quake$age)
+quake$count_floors_pre_eq <- ifelse(quake$count_floors_pre_eq > 5,5,quake$count_floors_pre_eq)
+quake$area_percentage <- ifelse(quake$area_percentage > 40,40,quake$area_percentage)
+quake$height_percentage <- ifelse(quake$height_percentage > 15,15,quake$height_percentage)
+###################################
+###################################
+
+
+#########################################################################
+################## Classificação com 3 fatores #########################
+
+ggplot(data = quake, aes(x = damage_grade , y = count_floors_pre_eq, fill = damage_grade))+
+  geom_boxplot()
+
+ggplot(data = quake, aes(x = age, fill = damage_grade))+
+  geom_density()
+
+ggplot(data = quake, aes(x = area_percentage, fill = damage_grade))+
+  geom_density()
+
+ggplot(data = quake, aes(x = height_percentage, fill = damage_grade))+
+  geom_density()
+
+ggplot(data = quake, aes(x = damage_grade, fill = land_surface_condition))+
+  geom_bar(position = 'fill')
+
+ggplot(data = quake, aes(x = damage_grade, fill = roof_type))+
+  geom_bar(position = 'fill')
+
+ggplot(data = quake, aes(x = damage_grade, fill = ground_floor_type))+
+  geom_bar(position = 'fill')
+
+ggplot(data = quake, aes(x = damage_grade, fill = geo_level_1_id ))+
+  geom_bar(position = 'fill')
+
+ggplot(data = quake, aes(geo_level_1_id, fill = damage_grade))+
+  geom_bar(position = 'fill')+
+  coord_flip()+
+  scale_fill_brewer(palette = 'Reds', direction = 1)+
+  theme_classic()
+
+# ----------------- using recipes ------------------------------------ ##
+
+
+rec <- recipe(damage_grade ~ . , data = quake) %>%
+  step_mutate(geo_level1 = factor(geo_level_1_id) ) %>% 
+  step_rm(building_id, geo_level_1_id, geo_level_2_id, geo_level_3_id) %>% 
+  step_BoxCox(all_numeric(), -contains('has_'), -all_outcomes()) %>% 
+  step_center(all_numeric(), -contains('has_'), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -contains('has_'), -all_outcomes()) %>% 
+  step_interact(terms = ~ area_percentage:height_percentage) %>% 
+  step_corr(all_numeric(), threshold = 0.9, -all_outcomes()) %>%
+  step_ns(age, deg_free = 3) %>% 
+  step_bin2factor(contains('has_'), levels = c('no','yes')) %>% 
+  step_other(all_nominal(), threshold = 0.01) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors())
+
+preparo <- prep(rec, quake) 
+quake.new <- bake(preparo, quake)
+dim(quake.new)
+
+# Plot Significante Values ##
+library(corrplot)
+
+quake.sig <- quake.new %>% 
+  mutate(
+    damage = ifelse(damage_grade == 'leve', 1,
+                    ifelse(damage_grade == 'mod', 2, 3))
+  ) %>% 
+  select(-damage_grade)
+
+correlations <- cor(quake.sig, y = quake.sig$damage)
+corrplot(correlations, tl.cex = 0.5, method = c('square'),
+         win.asp = 0.5)
+
+##Outro forma de visualizar
+corre <- as.data.frame(correlations)
+corre$variable <- rownames(corre)
+corre <- corre[1:76, ]
+rownames(corre) <- NULL
+
+corre <- corre %>% 
+  mutate(correlation = V1) %>% 
+  select(variable, correlation) %>% 
+  filter(!variable == 'damage') %>% 
+  mutate(
+    order = ifelse(correlation < 0,'negative','positive')
+  )
+
+ggplot(corre, aes(reorder(variable, correlation), weights = correlation, fill = order))+
+  geom_bar()+
+  coord_flip()+
+  theme_classic()+
+  labs(x = '', y = 'r Pearson', title = 'Correlations of predictors with Outcome')
+  
+# ---- Test a recipe to geo_level_2_id
+
+rec2 <- recipe(damage_grade ~ geo_level_2_id, data = quake) %>% 
+  step_mutate(geo_level2 = factor(geo_level_2_id)) %>%
+  step_other(geo_level2, threshold = 0.005, other = 'others') %>% 
+  step_zv(all_predictors())
+
+preparo2 <- prep(rec2, quake)
+quake.geo <- bake(preparo2, quake)
+
+ggplot(quake.geo, aes(geo_level2, fill = damage_grade))+
+  geom_bar(position = 'fill')+
+  coord_flip()+
+  theme_classic()+
+  scale_fill_brewer(palette = 'Reds', direction = 1)
+
+# PCA
+rec3 <- rec %>% 
+  step_pca(all_predictors()) %>% 
+  prep()
+
+quake.pca <- bake(rec3, quake)
+
+ggplot(quake.pca, aes(PC1, PC2, color = damage_grade))+
+  geom_point()
+
+# - data to Test ---- #
+quake.pred <- bake(preparo, earth03)
+
+# -- take a sample --- #
+quake.sample <- sample_n(quake.new, 50000)
+
+# --------------------- H2o ------------------------------------ #
+library(h2o)
+
+h2o.init(nthreads = -1)
+
+
+## ---------------- Load data ------ #
+
+quake.h2o <- as.h2o(quake.sample)
+
+##All data
+quake.h2o <- as.h2o(quake.new)
+
+##Test Data
+quake.h2o.pred <- as.h2o(quake.pred)
+
+# --------------- Data Split ------- #
+split <- h2o.splitFrame(quake.h2o, ratios = c(0.75, 0.15))
+quake.train <- split[[1]]
+quake.valid <- split[[2]]
+quake.test <- split[[3]]
+
+## --------------- Features -------- #
+x <- setdiff(names(quake.h2o), 'damage_grade')
+y <- 'damage_grade'
+
+## ---------------- Models ---------- #
+quake.glm <- h2o.glm(x = x, y = y, training_frame = quake.train,
+                     validation_frame = quake.valid, lambda_search = TRUE,
+                     family = 'multinomial', balance_classes = TRUE)
+
+quake.glm <- h2o.glm(x = x, y = y, training_frame = quake.train,
+                     nfolds = 5, lambda_search = TRUE,
+                     family = 'multinomial',
+                     keep_cross_validation_predictions = TRUE,
+                     fold_assignment = 'Modulo')
+quake.glm
+h2o.performance(quake.glm, newdata = quake.test)
+h2o.varimp_plot(quake.glm)
+h2o.varimp(quake.glm)
+
+
+quake.rf <- h2o.randomForest(x = x, y = y, training_frame = quake.train,
+                             validation_frame = quake.test)
+
+quake.rf <- h2o.randomForest(x = x, y = y, training_frame = quake.train,
+                   nfolds = 5, keep_cross_validation_predictions = TRUE,
+                   fold_assignment = 'Modulo')
+quake.rf
+h2o.performance(quake.rf, newdata = quake.test)
+h2o.varimp_plot(quake.rf)
+
+
+quake.gbm <- h2o.gbm(x = x, y = y, training_frame = quake.train,
+                     validation_frame = quake.valid, ntrees = 100)
+
+quake.gbm <- h2o.gbm(x = x, y = y, training_frame = quake.train,
+                     nfolds = 5, keep_cross_validation_predictions = TRUE,
+                     fold_assignment = 'Modulo')
+
+quake.gbm
+h2o.performance(quake.gbm ,newdata = quake.test)
+h2o.varimp_plot(quake.gbm)
+
+
+# ------------------ Var selection -------------- ###
+##Selecionar as 25 variavies mais importantes para o modelo deep learning
+importance <- as.data.frame(h2o.varimp(quake.glm))
+importancia <- as.character(importance$variable[1:25])
+
+xdeep <- importancia
+ydeep <- 'damage_grade'
+
+quake.deep <- h2o.deeplearning(x = xdeep, y = ydeep, training_frame = quake.train,
+                               validation_frame = quake.valid,
+                               hidden = c(200,200),
+                               activation = 'RectifierWithDropout',
+                               hidden_dropout_ratios = c(0.5, 0.3),
+                               input_dropout_ratio = 0.3,
+                               l1 = 0.0005,
+                               l2 = 0.0005,
+                               stopping_metric = 'AUTO',
+                               stopping_tolerance = 0.001,
+                               stopping_rounds = 4,
+                               epochs = 1000)
+
+h2o.performance(quake.deep, newdata = quake.test)
+h2o.varimp_plot(quake.deep)
+
+# ---------------- Essemble ---- #
+modelos <- c(quake.glm, quake.rf, quake.gbm)
+
+quake.essemble <- h2o.stackedEnsemble(x = x, y = y, training_frame = quake.train,
+                                      validation_frame = quake.valid,
+                                      base_models = modelos)
+
+h2o.performance(quake.essemble, newdata = quake.test)
+h2o.saveModel(quake.essemble, path = '~/Documents')
+
+
+## ----- Predictions --------------------- ##
+pred <- h2o.predict(quake.essemble, newdata = quake.h2o.pred)
+
+quake.final <- h2o.cbind(quake.h2o.pred, pred)
+quake.final <- as.data.frame(quake.final)
+
+quake.final <- quake.final %>% 
+  mutate(building_id = earth03$building_id) %>% 
+  select(building_id, predict) %>% 
+  mutate(
+    damage_grade = ifelse(predict == 'grave', 3,
+                          ifelse(predict == 'mod', 2, 1))
+      
+    ) %>% 
+  select(-predict)
+
+write.csv(quake.final, file = 'quake_pred4_2019.csv', row.names = FALSE,
+          quote = FALSE)
